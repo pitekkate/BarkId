@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.log
+temp/
+.DS_Store
+.env
+*.tar.gz
+*.zip

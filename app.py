@@ -1,127 +1,105 @@
 # app.py
-import gradio as gr
+from transformers import VitsModel, AutoTokenizer, pipeline
 import torch
 import scipy
-import tempfile
 import numpy as np
-from transformers import pipeline, VitsModel, AutoTokenizer
+import tempfile
+import gradio as gr
 
-# --- Muat Model ---
-# Model 1: Bark (untuk ekspresi dan musik)
-bark_pipe = pipeline("text-to-speech", "suno/bark")
-
-# Model 2: MMS-TTS untuk Indonesia (suara alami)
+# --- Muat Model MMS-TTS (Suara Alami Bahasa Indonesia) ---
+print("📥 Memuat model facebook/mms-tts-ind...")
 mms_model = VitsModel.from_pretrained("facebook/mms-tts-ind")
 mms_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ind")
+mms_sampling_rate = mms_model.config.sampling_rate
 
-# Daftar voice preset Bark
+# --- Muat Model Bark (Efek Suara & Musik) ---
+print("📥 Memuat pipeline suno/bark...")
+bark_pipe = pipeline("text-to-speech", "suno/bark")
+
+# Voice preset Bark
 BARK_PRESETS = [
     "v2/en_speaker_6",
     "v2/en_speaker_0",
     "v2/en_speaker_9",
 ]
 
-def generate_bark(text, preset):
+def generate_mms(text):
+    if not text.strip():
+        return None
+    inputs = mms_tokenizer(text.strip(), return_tensors="pt")
+    with torch.no_grad():
+        output = mms_model(**inputs).waveform
+    audio = output.numpy().squeeze()
+    audio = audio / max(0.01, np.max(np.abs(audio))) * 0.9
+    return mms_sampling_rate, audio
+
+def generate_bark(text, preset, add_bg):
     try:
         speech = bark_pipe(
             text,
             forward_params={"do_sample": True, "temperature": 0.7},
             generate_kwargs={"history_prompt": preset}
         )
-        audio = speech["audio"]
         sr = speech["sampling_rate"]
+        audio = speech["audio"]
+        if add_bg:
+            bg = np.random.normal(0, 0.003, len(audio))
+            bg = np.tile(bg, len(audio)//len(bg) + 1)[:len(audio)]
+            audio = audio * 0.9 + bg * 0.1
+            audio = np.clip(audio, -1.0, 1.0)
+        return sr, audio
     except Exception as e:
         print(f"Bark error: {e}")
-        return None
-    return sr, audio
-
-def generate_mms(text):
-    try:
-        inputs = mms_tokenizer(text, return_tensors="pt")
-        with torch.no_grad():
-            waveform = mms_model(**inputs).waveform
-        audio = waveform.numpy().squeeze()
-        sr = mms_model.config.sampling_rate
-    except Exception as e:
-        print(f"MMS error: {e}")
-        return None
-    return sr, audio
+        return None, None
 
 def tts_engine(text, model_choice, bark_preset, add_background=False):
     if not text.strip():
         return None
 
-    text = text.strip() + " ."
+    sr, audio = None, None
+    if model_choice == "MMS-TTS (Suara Alami)":
+        sr, audio = generate_mms(text)
+    elif model_choice == "Bark (Efek & Musik)":
+        sr, audio = generate_bark(text, bark_preset, add_background)
 
-    if model_choice == "Bark (dengan efek suara)":
-        result = generate_bark(text, bark_preset)
-        if result is None:
-            return None
-        sr, audio = result
-
-        # Tambahkan nuansa musik latar (opsional)
-        if add_background and len(audio) > 0:
-            bg = np.random.normal(0, 0.003, len(audio))
-            audio = audio * 0.9 + bg * 0.1
-            audio = np.clip(audio, -1.0, 1.0)
-
-    elif model_choice == "MMS-TTS (suara alami)":
-        result = generate_mms(text)
-        if result is None:
-            return None
-        sr, audio = result
-    else:
+    if audio is None:
         return None
 
-    # Simpan sementara
     temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     scipy.io.wavfile.write(temp_file.name, rate=sr, data=audio)
     return temp_file.name
 
 # --- Antarmuka Gradio ---
-with gr.Blocks(theme=gr.themes.Soft(), title="🇮🇩 TTS Indonesia") as demo:
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("""
-    # 🇮🇩 TTS Indonesia: Bark vs MMS-TTS
-    Aplikasi ini membandingkan dua model TTS untuk bahasa Indonesia:
-    
-    - **Bark**: Suara ekspresif dengan tawa, musik, dan efek suara (`[laughs]`, `[music]`, `♪`)
-    - **MMS-TTS**: Suara alami dan jernih, khusus dilatih untuk bahasa Indonesia
-    
-    Pilih model dan dengarkan perbedaannya!
+    # 🇮🇩 TTS Indonesia: MMS-TTS + Bark
+    Aplikasi ini menggabungkan dua model terbaik:
+    - ✅ **MMS-TTS**: Suara alami bahasa Indonesia
+    - ✅ **Bark**: Efek suara, musik, tawa (`[laughs]`, `[music]`)
     """)
 
     with gr.Row():
-        with gr.Column(scale=2):
+        with gr.Column():
             text_input = gr.Textbox(
-                label="Teks dalam Bahasa Indonesia",
-                placeholder="Contoh: Saya suka makan sate di pinggir jalan sambil mendengarkan musik [music] dan tertawa bersama teman.",
+                label="Teks (dalam bahasa Indonesia)",
+                placeholder="Contoh: Saya suka makan sate [music] sambil tertawa [laughs]",
                 lines=5
             )
-
             model_choice = gr.Radio(
-                choices=[
-                    "Bark (dengan efek suara)",
-                    "MMS-TTS (suara alami)"
-                ],
-                value="Bark (dengan efek suara)",
+                ["MMS-TTS (Suara Alami)", "Bark (Efek & Musik)"],
+                value="MMS-TTS (Suara Alami)",
                 label="Pilih Model"
             )
-
-            with gr.Group(visible=True) as bark_options:
+            with gr.Group(visible=False) as bark_options:
                 bark_preset = gr.Dropdown(BARK_PRESETS, label="Suara", value="v2/en_speaker_6")
                 add_bg = gr.Checkbox(label="Tambahkan nuansa musik latar?", value=True)
-
             btn = gr.Button("🔊 Hasilkan Audio")
 
-        with gr.Column(scale=3):
-            output_audio = gr.Audio(label="Hasil Audio", type="filepath")
-
-    # Update opsi berdasarkan pilihan model
-    def show_bark_options(choice):
-        return gr.update(visible=choice == "Bark (dengan efek suara)")
+        with gr.Column():
+            output_audio = gr.Audio(label="Hasil Audio")
 
     model_choice.change(
-        fn=show_bark_options,
+        fn=lambda choice: gr.update(visible=choice=="Bark (Efek & Musik)"),
         inputs=model_choice,
         outputs=bark_options
     )
@@ -133,17 +111,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="🇮🇩 TTS Indonesia") as demo:
     )
 
     gr.Markdown("""
-    ### 📌 Panduan Penggunaan
-    - **Gunakan `[music]` atau `♪`** hanya di **Bark** untuk efek musik.
-    - **MMS-TTS** tidak mendukung efek suara, tapi suaranya lebih alami.
-    - Cocok untuk:
-      - Konten YouTube (Bark)
-      - Audiobook, e-learning (MMS-TTS)
-      - Iklan lokal (kombinasi keduanya)
-
     > ℹ️ Model:  
-    > - [suno/bark](https://huggingface.co/suno/bark) – CC-BY-NC-4.0  
-    > - [facebook/mms-tts-ind](https://huggingface.co/facebook/mms-tts-ind) – CC-BY-NC-4.0
+    > - [facebook/mms-tts-ind](https://huggingface.co/facebook/mms-tts-ind) – CC-BY-NC-4.0  
+    > - [suno/bark](https://huggingface.co/suno/bark) – CC-BY-NC-4.0
     """)
 
 if __name__ == "__main__":
